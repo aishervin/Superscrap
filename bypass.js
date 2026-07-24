@@ -1,13 +1,13 @@
 /**
  * ============================================================================
- *  ☬ SHΞN™ MONSTER SCRAPER | DYNAMIC CORS PROXY GATEWAY
+ *  ☬ SHΞN™ MONSTER SCRAPER | DYNAMIC CORS PROXY GATEWAY (IFRAME UNLOCKED)
  * ============================================================================
  *  Architect & Lead Developer: Shervin (☬SHΞN™)
  *  Network & Security Domain: T.me/aishervin | Shervinofpersia.github.io
  * 
  *  Description: 
  *  Serverless Dynamic CORS Proxy + HTML Rewriter. 
- *  Usage: https://your-worker.workers.dev/https://target.com
+ *  Strips X-Frame-Options & CSP headers to allow embedding ANY site in iframes.
  * 
  *  Exclusive ☬SHΞN™ made.
  * ============================================================================
@@ -17,10 +17,8 @@ export default {
     async fetch(request) {
         const url = new URL(request.url);
         
-        // استخراج آدرس هدف از مسیر URL
         let targetUrlStr = url.pathname.substring(1) + url.search;
 
-        // اگر آدرسی وارد نشده بود، یک پیام راهنما نشان بده
         if (!targetUrlStr) {
             return new Response("☬ SHΞN™ Proxy Hub is Active.\nUsage: /https://example.com", { 
                 status: 200, 
@@ -28,7 +26,6 @@ export default {
             });
         }
 
-        // اصلاح ساختار آدرس در صورت نیاز
         if (!targetUrlStr.startsWith('http')) {
             targetUrlStr = 'https://' + targetUrlStr;
         }
@@ -36,7 +33,6 @@ export default {
         try {
             const targetUrl = new URL(targetUrlStr);
             
-            // ساخت درخواست جدید برای ارسال به سرور هدف
             const modifiedRequest = new Request(targetUrl, {
                 method: request.method,
                 headers: request.headers,
@@ -44,7 +40,6 @@ export default {
                 redirect: 'follow'
             });
 
-            // حذف هدرهایی که ممکنه باعث بلاک شدن درخواست توسط کلودفلرِ سرور هدف بشن
             modifiedRequest.headers.delete('Host');
             modifiedRequest.headers.delete('Origin');
             modifiedRequest.headers.delete('Referer');
@@ -52,12 +47,17 @@ export default {
             const response = await fetch(modifiedRequest);
             const contentType = response.headers.get("content-type") || "";
 
-            // کپی ریسپانس برای تنظیم هدرهای CORS پراکسی
             let proxyResponse = new Response(response.body, response);
+            
             proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
             proxyResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
 
-            // تزریق اسکریپت فقط در صورتی که محتوا HTML باشد
+            // 🔥 حذف هدرهای امنیتی ضد Iframe (برای باز شدن در داشبورد)
+            proxyResponse.headers.delete('X-Frame-Options');
+            proxyResponse.headers.delete('Content-Security-Policy');
+            proxyResponse.headers.delete('Content-Security-Policy-Report-Only');
+            proxyResponse.headers.delete('Clear-Site-Data');
+
             if (contentType.includes("text/html")) {
                 return new HTMLRewriter()
                     .on("head", new ShenAntiFingerprintInjector())
