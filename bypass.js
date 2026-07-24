@@ -1,6 +1,6 @@
 // ================================================================
-//  ☬ SHΞN™ Ultimate Bypass Proxy - Full-Featured Enterprise Worker
-//  همه‌ی قابلیت‌ها در یک فایل: SSRF, Rate Limit, Circuit Breaker,
+//  ☬ SHΞN™ Monster Bypass Proxy - Full-Featured Enterprise Worker
+//   SSRF, Rate Limit, Circuit Breaker,
 //  Cookie Jar, WebSocket/SSE, HTML Rewriter, Cache, Modes, etc.
 // ================================================================
 
