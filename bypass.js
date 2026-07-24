@@ -1,8 +1,10 @@
 // ================================================================
 //  ☬Exclusive SHΞN™ made Enterprise Cloudflare Worker
-//  Features: SSRF Protection, Rate Limiting, Smart Caching, 
-//  Link Tracing, Custom Headers, Circuit Breaker
-//  Zero-Dependency
+//  Enhanced with HTML Rewriting & Full Browser Simulation
+//  Features: SSRF Protection, Rate Limiting, Smart Caching,
+//  Link Tracing, Custom Headers, Circuit Breaker,
+//  HTML Rewriter (for iframe-compatible rendering),
+//  Cookie Management, Security Header Stripping
 // ================================================================
 
 const CONFIG = {
@@ -13,8 +15,9 @@ const CONFIG = {
   ],
   CIRCUIT_BREAKER: { failureThreshold: 5, timeout: 30000 },
   RETRY: { maxAttempts: 3, baseDelay: 1000 },
-  RATE_LIMIT: { maxRequestsPerMinute: 60 }, // محدودیت درخواست در دقیقه برای هر IP
-  MAX_TIMEOUT: 30000 // حداکثر تایم‌اوت مجاز (میلی‌ثانیه)
+  RATE_LIMIT: { maxRequestsPerMinute: 60 },
+  MAX_TIMEOUT: 30000,
+  COOKIE_TTL: 3600 // کوکی‌ها یک ساعت نگهداری می‌شوند (با Cache API)
 };
 
 // --- Utility: SSRF Protection ---
@@ -76,9 +79,8 @@ async function checkRateLimit(clientIp) {
   
   let count = cached ? parseInt(await cached.text()) : 0;
   if (count >= CONFIG.RATE_LIMIT.maxRequestsPerMinute) {
-    return false; // Rate limit exceeded
+    return false;
   }
-  
   count++;
   await cache.put(cacheKey, new Response(count.toString(), { 
     headers: { 'Cache-Control': `max-age=60` } 
@@ -86,6 +88,125 @@ async function checkRateLimit(clientIp) {
   return true;
 }
 
+// --- Utility: Cookie Jar (Store cookies from Set-Cookie and resend them) ---
+async function getCookieJar(host) {
+  const cache = caches.default;
+  const key = `cookie-jar-${host}`;
+  const cached = await cache.match(key);
+  if (cached) {
+    return await cached.json();
+  }
+  return {};
+}
+
+async function setCookieJar(host, cookies) {
+  const cache = caches.default;
+  const key = `cookie-jar-${host}`;
+  await cache.put(key, new Response(JSON.stringify(cookies), {
+    headers: { 'Cache-Control': `max-age=${CONFIG.COOKIE_TTL}` }
+  }));
+}
+
+function parseSetCookie(setCookieHeader, existingCookies) {
+  const cookies = { ...existingCookies };
+  const parts = setCookieHeader.split(';');
+  const nameValue = parts[0].trim().split('=');
+  if (nameValue.length === 2) {
+    const name = nameValue[0];
+    const value = nameValue[1];
+    // فقط کوکی‌های بدون path خاص یا با path=/ را نگه می‌داریم (ساده‌سازی)
+    const pathPart = parts.find(p => p.trim().toLowerCase().startsWith('path='));
+    if (!pathPart || pathPart.split('=')[1].trim() === '/') {
+      cookies[name] = value;
+    }
+  }
+  return cookies;
+}
+
+function buildCookieHeader(cookies) {
+  return Object.entries(cookies)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('; ');
+}
+
+// --- HTML Rewriter Class for Link Rewriting ---
+class LinkRewriter {
+  constructor(baseUrl, proxyBase) {
+    this.baseUrl = baseUrl;
+    this.proxyBase = proxyBase;
+  }
+
+  // تبدیل یک آدرس نسبی یا مطلق به آدرس کامل از طریق پراکسی
+  rewriteUrl(url, element) {
+    if (!url) return null;
+    // اگر قبلاً به پراکسی اشاره دارد یا داده‌ای (data:) است، دست نزنیم
+    if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('javascript:')) {
+      return null;
+    }
+    // اگر آدرس مطلق است و به همان دامنه یا دامنه دیگر اشاره دارد، آن را از طریق پراکسی بفرست
+    try {
+      const absolute = new URL(url, this.baseUrl);
+      // برای جلوگیری از لوپ، اگر آدرس به خود پراکسی اشاره دارد، آن را به‌حال خود بگذار
+      if (absolute.origin === new URL(this.proxyBase).origin) {
+        return null;
+      }
+      // تبدیل به HTTPS اگر پروتکل HTTP بود (برای جلوگیری از Mixed Content)
+      if (absolute.protocol === 'http:') {
+        absolute.protocol = 'https:';
+      }
+      // ساخت آدرس جدید از طریق پراکسی
+      return `${this.proxyBase}?url=${encodeURIComponent(absolute.toString())}&mode=iframe&cache=true`;
+    } catch (e) {
+      return null; // آدرس نامعتبر
+    }
+  }
+
+  element(element) {
+    const tag = element.tagName;
+    let attr = null;
+    let value = null;
+
+    // صفات مختلف برای تگ‌های مختلف
+    if (tag === 'a' || tag === 'link') {
+      attr = 'href';
+      value = element.getAttribute('href');
+    } else if (tag === 'img' || tag === 'script' || tag === 'iframe' || tag === 'source' || tag === 'track') {
+      attr = 'src';
+      value = element.getAttribute('src');
+    } else if (tag === 'form') {
+      attr = 'action';
+      value = element.getAttribute('action');
+    } else if (tag === 'meta' && element.getAttribute('http-equiv')?.toLowerCase() === 'refresh') {
+      // متا رفرش: محتوای آن را بازنویسی می‌کنیم
+      const content = element.getAttribute('content');
+      if (content) {
+        const match = content.match(/url=(.+)/i);
+        if (match) {
+          const newUrl = this.rewriteUrl(match[1], element);
+          if (newUrl) {
+            element.setAttribute('content', content.replace(/url=.+/i, `url=${newUrl}`));
+          }
+        }
+      }
+      return;
+    }
+
+    if (attr && value) {
+      const newValue = this.rewriteUrl(value, element);
+      if (newValue) {
+        element.setAttribute(attr, newValue);
+      }
+    }
+  }
+
+  // برای تگ <base> اگر وجود داشت، آن را حذف می‌کنیم تا با لینک‌های نسبی تداخل نداشته باشد
+  // یا می‌توانیم آن را به آدرس پراکسی تغییر دهیم
+  comments(comment) {
+    // کاری نمی‌کنیم
+  }
+}
+
+// --- Main Handler ---
 export default {
   async fetch(request, env, ctx) {
     const startTime = Date.now();
@@ -99,7 +220,7 @@ export default {
 
     const url = new URL(request.url);
     const targetUrlStr = url.searchParams.get('url');
-    const mode = url.searchParams.get('mode') || 'raw'; // raw, trace, headers
+    const mode = url.searchParams.get('mode') || 'raw'; // raw, trace, headers, iframe
     const useCache = url.searchParams.get('cache') === 'true';
     const customTimeout = parseInt(url.searchParams.get('timeout')) || CONFIG.MAX_TIMEOUT;
 
@@ -129,7 +250,7 @@ export default {
       });
     }
 
-    // 3. WebSocket & SSE Handling (Preserved from original)
+    // 3. WebSocket & SSE Handling
     const upgradeHeader = request.headers.get('upgrade');
     if (upgradeHeader === 'websocket' || targetUrl.protocol === 'ws:' || targetUrl.protocol === 'wss:') {
       return handleWebSocket(request, targetUrl.toString(), requestId);
@@ -146,8 +267,12 @@ export default {
       });
     }
 
-    // 5. Smart Caching Check (Only for GET/HEAD in raw mode)
-    if (useCache && ['GET', 'HEAD'].includes(request.method) && mode === 'raw') {
+    // 5. Cookie Management
+    let cookieJar = await getCookieJar(targetUrl.host);
+    const cookieHeader = buildCookieHeader(cookieJar);
+
+    // 6. Smart Caching Check (Only for GET/HEAD in raw/iframe mode)
+    if (useCache && ['GET', 'HEAD'].includes(request.method) && (mode === 'raw' || mode === 'iframe')) {
       const cache = caches.default;
       const cacheResponse = await cache.match(request);
       if (cacheResponse) {
@@ -158,7 +283,7 @@ export default {
       }
     }
 
-    // 6. Request Preparation
+    // 7. Request Preparation
     let lastError = null;
     let delay = CONFIG.RETRY.baseDelay;
 
@@ -167,7 +292,7 @@ export default {
         const headers = new Headers(request.headers);
         headers.set('User-Agent', CONFIG.USER_AGENTS[Math.floor(Math.random() * CONFIG.USER_AGENTS.length)]);
         
-        // Inject Custom Headers if provided by client (e.g., X-Proxy-Custom-Headers: {"Authorization": "Bearer 123"})
+        // Inject Custom Headers if provided
         const customHeadersStr = request.headers.get('x-proxy-custom-headers');
         if (customHeadersStr) {
           try {
@@ -180,6 +305,11 @@ export default {
         ['host', 'connection', 'cf-connecting-ip', 'cf-worker', 'cf-ray', 'x-forwarded-for', 'x-real-ip', 'x-proxy-custom-headers']
           .forEach(h => headers.delete(h));
 
+        // Add Cookie header if we have any
+        if (cookieHeader) {
+          headers.set('Cookie', cookieHeader);
+        }
+
         const hasBody = !['GET', 'HEAD'].includes(request.method);
         let bodyData = undefined;
         if (hasBody) {
@@ -188,10 +318,8 @@ export default {
             : await request.arrayBuffer();
         }
 
-        // Dynamic Redirect Behavior based on mode
-        const redirectBehavior = mode === 'trace' ? 'follow' : 'manual';
+        const redirectBehavior = (mode === 'trace') ? 'follow' : 'manual';
 
-        // AbortController for dynamic timeout
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), customTimeout);
 
@@ -206,13 +334,34 @@ export default {
         clearTimeout(timeoutId);
         breaker.recordSuccess();
 
+        // --- Extract and Store Cookies from Set-Cookie ---
+        const setCookie = response.headers.get('set-cookie');
+        if (setCookie) {
+          cookieJar = parseSetCookie(setCookie, cookieJar);
+          await setCookieJar(targetUrl.host, cookieJar);
+        }
+
+        // --- Build Response Headers ---
         const responseHeaders = new Headers(response.headers);
         handleCors(responseHeaders);
         responseHeaders.set('X-Proxy-Request-Id', requestId);
         responseHeaders.set('X-Proxy-Execution-Time', `${Date.now() - startTime}ms`);
         responseHeaders.set('X-Proxy-Final-Url', response.url);
 
-        // 7. Mode-Specific Responses
+        // --- Remove Security Headers that block iframe ---
+        const securityHeadersToRemove = [
+          'x-frame-options',
+          'content-security-policy',
+          'x-content-type-options',
+          'feature-policy',
+          'permissions-policy',
+          'cross-origin-embedder-policy',
+          'cross-origin-opener-policy',
+          'cross-origin-resource-policy'
+        ];
+        securityHeadersToRemove.forEach(h => responseHeaders.delete(h));
+
+        // --- Mode-Specific Responses ---
         if (mode === 'trace') {
           const traceData = {
             success: response.ok,
@@ -238,7 +387,48 @@ export default {
           });
         }
 
-        // Default 'raw' mode (Standard Proxy)
+        // --- Special mode: iframe (HTML Rewriting) ---
+        if (mode === 'iframe') {
+          const contentType = response.headers.get('content-type') || '';
+          if (!contentType.includes('text/html')) {
+            // اگر HTML نباشد، همان raw را برگردان (تصاویر، CSS، JS و ...)
+            return new Response(response.body, { status: response.status, headers: responseHeaders });
+          }
+
+          const originalBody = await response.text();
+          const proxyBase = `${url.origin}${url.pathname}`; // مثلاً https://superscrap.../
+          
+          // ایجاد یک HTMLRewriter با استفاده از کلاس LinkRewriter
+          const rewriter = new HTMLRewriter()
+            .on('a', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('link', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('img', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('script', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('iframe', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('source', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('track', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('form', new LinkRewriter(targetUrl.toString(), proxyBase))
+            .on('meta', new LinkRewriter(targetUrl.toString(), proxyBase));
+
+          // اعمال بازنویسی روی محتوای HTML
+          const transformedHtml = await rewriter.transform(new Response(originalBody, {
+            headers: responseHeaders
+          })).text();
+
+          // بروزرسانی هدرها با محتوای جدید
+          responseHeaders.set('content-length', transformedHtml.length.toString());
+          
+          // اگر کش فعال است، پاسخ جدید را کش کنیم
+          if (useCache && ['GET', 'HEAD'].includes(request.method) && response.ok) {
+            const cache = caches.default;
+            ctx.waitUntil(cache.put(request, new Response(transformedHtml, { headers: responseHeaders })));
+            responseHeaders.set('X-Proxy-Cache-Status', 'MISS (CACHED)');
+          }
+
+          return new Response(transformedHtml, { status: response.status, headers: responseHeaders });
+        }
+
+        // --- Default 'raw' mode (Standard Proxy) ---
         if (useCache && ['GET', 'HEAD'].includes(request.method) && response.ok) {
            const cache = caches.default;
            ctx.waitUntil(cache.put(request, response.clone()));
@@ -252,7 +442,7 @@ export default {
         breaker.recordFailure();
         if (attempt < CONFIG.RETRY.maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, delay));
-          delay *= 2; // Exponential backoff
+          delay *= 2;
         }
       }
     }
@@ -269,7 +459,7 @@ export default {
   }
 };
 
-// --- WebSocket Handler (Unchanged logic, added requestId for logging if needed) ---
+// --- WebSocket Handler (Unchanged) ---
 async function handleWebSocket(request, targetUrl, requestId) {
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
@@ -290,7 +480,7 @@ async function handleWebSocket(request, targetUrl, requestId) {
   return new Response(null, { status: 101, webSocket: client });
 }
 
-// --- SSE Handler (Unchanged logic, added requestId) ---
+// --- SSE Handler (Unchanged) ---
 async function handleSSE(request, targetUrl, requestId) {
   const headers = new Headers(request.headers);
   ['host', 'connection', 'cf-connecting-ip', 'cf-ray'].forEach(h => headers.delete(h));
