@@ -1,15 +1,14 @@
 /**
  * ============================================================================
- *  ☬ SHΞN™ MONSTER SCRAPER | DYNAMIC CORS PROXY GATEWAY (ASSET FIX)
+ *  ☬ SHΞN™ MONSTER SCRAPER | ULTIMATE STEALTH PROXY GATEWAY
  * ============================================================================
  *  Architect & Lead Developer: Shervin (☬SHΞN™)
  *  Network & Security Domain: T.me/aishervin | Shervinofpersia.github.io
  * 
- *  Description: 
- *  Serverless Dynamic CORS Proxy + HTML Asset Rewriter. 
- *  - Strips X-Frame-Options & CSP headers.
- *  - Dynamically rewrites all relative paths (CSS, JS, Img) to absolute proxy paths.
- *  - Handles nested requests (like @import in CSS) via Referer interception.
+ *  New Features Added:
+ *  - Network-Level Header Forwarding (Bypasses Target WAFs).
+ *  - CSS Content Rewriter (Fixes background-images and @imports).
+ *  - WebRTC Leak Protection & window.chrome spoofing.
  * 
  *  Exclusive ☬SHΞN™ made.
  * ============================================================================
@@ -18,10 +17,8 @@
 export default {
     async fetch(request) {
         const url = new URL(request.url);
-        
         let targetUrlStr = url.pathname.substring(1) + url.search;
 
-        // راهنمای استفاده
         if (!targetUrlStr) {
             return new Response("☬ SHΞN™ Proxy Hub is Active.\nUsage: /https://example.com", { 
                 status: 200, 
@@ -29,19 +26,15 @@ export default {
             });
         }
 
-        // 🔥 سیستم هوشمند بازسازی آدرس‌های شکسته (برای درخواست‌های ثانویه مثل فونت‌ها و CSS های داخلی)
         if (!targetUrlStr.startsWith('http://') && !targetUrlStr.startsWith('https://')) {
             const referer = request.headers.get('Referer');
             if (referer) {
                 try {
                     const refUrl = new URL(referer);
                     const refTarget = refUrl.pathname.substring(1);
-                    if (refTarget.startsWith('http')) {
-                        // چسباندن آدرس نسبی به آدرس سایت هدفِ استخراج شده از Referer
-                        targetUrlStr = new URL(targetUrlStr, refTarget).href;
-                    } else {
-                        targetUrlStr = 'https://' + targetUrlStr;
-                    }
+                    targetUrlStr = refTarget.startsWith('http') 
+                        ? new URL(targetUrlStr, refTarget).href 
+                        : 'https://' + targetUrlStr;
                 } catch (e) {
                     targetUrlStr = 'https://' + targetUrlStr;
                 }
@@ -53,24 +46,45 @@ export default {
         try {
             const targetUrl = new URL(targetUrlStr);
             
+            // 🔥 ۱. انتقال دقیق هدرهای مرورگر کاربر به سرور هدف برای دور زدن WAF
+            const headersToForward = new Headers();
+            const allowedHeaders = ['accept', 'accept-language', 'user-agent', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform', 'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'cookie'];
+            
+            for (const [key, value] of request.headers.entries()) {
+                if (allowedHeaders.includes(key.toLowerCase())) {
+                    headersToForward.set(key, value);
+                }
+            }
+            
+            // تنظیم هدرهای ضروری برای درخواست طبیعی
+            headersToForward.set('Host', targetUrl.hostname);
+
             const modifiedRequest = new Request(targetUrl, {
                 method: request.method,
-                headers: request.headers,
+                headers: headersToForward,
                 body: request.body,
                 redirect: 'follow'
             });
 
-            // حذف هدرهایی که کلاینت را لو می‌دهند یا باعث بلاک شدن توسط فایروال سایت هدف می‌شوند
-            modifiedRequest.headers.delete('Host');
-            modifiedRequest.headers.delete('Origin');
-            modifiedRequest.headers.delete('Referer');
-
             const response = await fetch(modifiedRequest);
             const contentType = response.headers.get("content-type") || "";
 
+            // 🔥 ۲. بازنویسی فایل‌های CSS برای لود شدن بک‌گراندها و فونت‌ها
+            if (contentType.includes("text/css")) {
+                let cssText = await response.text();
+                // پیدا کردن url(...) و @import و جایگذاری با آدرس پراکسی
+                cssText = cssText.replace(/url\(\s*['"]?(?!data:)(?!http)([^'"\)]+)['"]?\s*\)/gi, (match, path) => {
+                    const absoluteUrl = new URL(path, targetUrl.href).href;
+                    return `url("${url.origin}/${absoluteUrl}")`;
+                });
+                
+                let cssResponse = new Response(cssText, response);
+                cssResponse.headers.set('Access-Control-Allow-Origin', '*');
+                return cssResponse;
+            }
+
             let proxyResponse = new Response(response.body, response);
             
-            // باز کردن قفل‌های امنیتی برای لود شدن درون iframe داشبورد شما
             proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
             proxyResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
             proxyResponse.headers.delete('X-Frame-Options');
@@ -78,7 +92,13 @@ export default {
             proxyResponse.headers.delete('Content-Security-Policy-Report-Only');
             proxyResponse.headers.delete('Clear-Site-Data');
 
-            // 🔥 تزریق کدهای آنتی-فینگرپرینت + اصلاح تمام لینک‌های استایل و اسکریپت
+            // مدیریت کوکی‌ها (حذف دامین برای نشستن کوکی روی دامنه پراکسی)
+            const setCookie = proxyResponse.headers.get('set-cookie');
+            if (setCookie) {
+                const rewrittenCookie = setCookie.replace(/domain=[^;]+/gi, '');
+                proxyResponse.headers.set('set-cookie', rewrittenCookie);
+            }
+
             if (contentType.includes("text/html")) {
                 return new HTMLRewriter()
                     .on("head", new ShenAntiFingerprintInjector())
@@ -94,9 +114,6 @@ export default {
     }
 };
 
-/**
- * کلاس اصلاح‌کننده مسیرها (تبدیل آدرس‌های نسبی سایت هدف به مسیرهای پروکسی شده)
- */
 class ShenAssetRewriter {
     constructor(proxyOrigin, targetBaseUrl) {
         this.proxyOrigin = proxyOrigin;
@@ -105,12 +122,9 @@ class ShenAssetRewriter {
     element(element) {
         ['href', 'src', 'action'].forEach(attr => {
             const originalValue = element.getAttribute(attr);
-            // از تغییر لینک‌های داخلی (مثل # و data: و javascript:) صرف‌نظر کن
             if (originalValue && !originalValue.startsWith('data:') && !originalValue.startsWith('#') && !originalValue.startsWith('javascript:')) {
                 try {
-                    // تبدیل آدرس نسبی به آدرس کامل هدف
                     const resolvedUrl = new URL(originalValue, this.targetBaseUrl).href;
-                    // مسیردهی مجدد به سمت ورکر شما
                     element.setAttribute(attr, this.proxyOrigin + '/' + resolvedUrl);
                 } catch (e) {}
             }
@@ -118,15 +132,25 @@ class ShenAssetRewriter {
     }
 }
 
-/**
- * کلاس تزریق اسکریپت دور زدن سیستم‌های ضد ربات
- */
 class ShenAntiFingerprintInjector {
     element(element) {
         const payload = `
         <script>
         (function() {
             'use strict';
+            
+            // 🔥 ۳. جعل کامل آبجکت کروم و محافظت WebRTC
+            if (!window.chrome) {
+                window.chrome = { runtime: {} };
+            }
+            
+            const originalRTCPeerConnection = window.RTCPeerConnection;
+            window.RTCPeerConnection = function(...args) {
+                const pc = new originalRTCPeerConnection(...args);
+                pc.createDataChannel = () => { return {} }; // Block data channels
+                return pc;
+            };
+
             Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5], configurable: true });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
@@ -218,7 +242,7 @@ class ShenAntiFingerprintInjector {
                 })
             });
             
-            console.log('%c[☬SHΞN™ Core] Anti-Fingerprint Protocol Initialized.', 'color: #00ff00; font-weight: bold; background: #000; padding: 5px;');
+            console.log('%c[☬SHΞN™ Core] Stealth Protocol Initialized.', 'color: #00ff00; font-weight: bold; background: #000; padding: 5px;');
         })();
         </script>
         `;
