@@ -1,13 +1,15 @@
 /**
  * ============================================================================
- *  ☬ SHΞN™ MONSTER SCRAPER | DYNAMIC CORS PROXY GATEWAY (IFRAME UNLOCKED)
+ *  ☬ SHΞN™ MONSTER SCRAPER | DYNAMIC CORS PROXY GATEWAY (ASSET FIX)
  * ============================================================================
  *  Architect & Lead Developer: Shervin (☬SHΞN™)
  *  Network & Security Domain: T.me/aishervin | Shervinofpersia.github.io
  * 
  *  Description: 
- *  Serverless Dynamic CORS Proxy + HTML Rewriter. 
- *  Strips X-Frame-Options & CSP headers to allow embedding ANY site in iframes.
+ *  Serverless Dynamic CORS Proxy + HTML Asset Rewriter. 
+ *  - Strips X-Frame-Options & CSP headers.
+ *  - Dynamically rewrites all relative paths (CSS, JS, Img) to absolute proxy paths.
+ *  - Handles nested requests (like @import in CSS) via Referer interception.
  * 
  *  Exclusive ☬SHΞN™ made.
  * ============================================================================
@@ -19,6 +21,7 @@ export default {
         
         let targetUrlStr = url.pathname.substring(1) + url.search;
 
+        // راهنمای استفاده
         if (!targetUrlStr) {
             return new Response("☬ SHΞN™ Proxy Hub is Active.\nUsage: /https://example.com", { 
                 status: 200, 
@@ -26,8 +29,25 @@ export default {
             });
         }
 
-        if (!targetUrlStr.startsWith('http')) {
-            targetUrlStr = 'https://' + targetUrlStr;
+        // 🔥 سیستم هوشمند بازسازی آدرس‌های شکسته (برای درخواست‌های ثانویه مثل فونت‌ها و CSS های داخلی)
+        if (!targetUrlStr.startsWith('http://') && !targetUrlStr.startsWith('https://')) {
+            const referer = request.headers.get('Referer');
+            if (referer) {
+                try {
+                    const refUrl = new URL(referer);
+                    const refTarget = refUrl.pathname.substring(1);
+                    if (refTarget.startsWith('http')) {
+                        // چسباندن آدرس نسبی به آدرس سایت هدفِ استخراج شده از Referer
+                        targetUrlStr = new URL(targetUrlStr, refTarget).href;
+                    } else {
+                        targetUrlStr = 'https://' + targetUrlStr;
+                    }
+                } catch (e) {
+                    targetUrlStr = 'https://' + targetUrlStr;
+                }
+            } else {
+                targetUrlStr = 'https://' + targetUrlStr;
+            }
         }
 
         try {
@@ -40,6 +60,7 @@ export default {
                 redirect: 'follow'
             });
 
+            // حذف هدرهایی که کلاینت را لو می‌دهند یا باعث بلاک شدن توسط فایروال سایت هدف می‌شوند
             modifiedRequest.headers.delete('Host');
             modifiedRequest.headers.delete('Origin');
             modifiedRequest.headers.delete('Referer');
@@ -49,18 +70,19 @@ export default {
 
             let proxyResponse = new Response(response.body, response);
             
+            // باز کردن قفل‌های امنیتی برای لود شدن درون iframe داشبورد شما
             proxyResponse.headers.set('Access-Control-Allow-Origin', '*');
             proxyResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-
-            // 🔥 حذف هدرهای امنیتی ضد Iframe (برای باز شدن در داشبورد)
             proxyResponse.headers.delete('X-Frame-Options');
             proxyResponse.headers.delete('Content-Security-Policy');
             proxyResponse.headers.delete('Content-Security-Policy-Report-Only');
             proxyResponse.headers.delete('Clear-Site-Data');
 
+            // 🔥 تزریق کدهای آنتی-فینگرپرینت + اصلاح تمام لینک‌های استایل و اسکریپت
             if (contentType.includes("text/html")) {
                 return new HTMLRewriter()
                     .on("head", new ShenAntiFingerprintInjector())
+                    .on("link, script, img, a, form, iframe, source", new ShenAssetRewriter(url.origin, targetUrl.href))
                     .transform(proxyResponse);
             }
 
@@ -72,6 +94,33 @@ export default {
     }
 };
 
+/**
+ * کلاس اصلاح‌کننده مسیرها (تبدیل آدرس‌های نسبی سایت هدف به مسیرهای پروکسی شده)
+ */
+class ShenAssetRewriter {
+    constructor(proxyOrigin, targetBaseUrl) {
+        this.proxyOrigin = proxyOrigin;
+        this.targetBaseUrl = targetBaseUrl;
+    }
+    element(element) {
+        ['href', 'src', 'action'].forEach(attr => {
+            const originalValue = element.getAttribute(attr);
+            // از تغییر لینک‌های داخلی (مثل # و data: و javascript:) صرف‌نظر کن
+            if (originalValue && !originalValue.startsWith('data:') && !originalValue.startsWith('#') && !originalValue.startsWith('javascript:')) {
+                try {
+                    // تبدیل آدرس نسبی به آدرس کامل هدف
+                    const resolvedUrl = new URL(originalValue, this.targetBaseUrl).href;
+                    // مسیردهی مجدد به سمت ورکر شما
+                    element.setAttribute(attr, this.proxyOrigin + '/' + resolvedUrl);
+                } catch (e) {}
+            }
+        });
+    }
+}
+
+/**
+ * کلاس تزریق اسکریپت دور زدن سیستم‌های ضد ربات
+ */
 class ShenAntiFingerprintInjector {
     element(element) {
         const payload = `
